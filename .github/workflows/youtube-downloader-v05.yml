@@ -1,0 +1,114 @@
+name: 05- 🎬 Youtube Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube video URL'
+        required: true
+        type: string
+      quality:
+        description: 'Video quality (best, 1080, 720, 480, audio)'
+        required: false
+        default: 'best'
+        type: string
+      folder_name:
+        description: 'Folder name for this video'
+        required: true
+        type: string
+
+jobs:
+  download-youtube:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start WARP Container
+        run: |
+          echo "Starting Cloudflare WARP container..."
+          docker network create warp-net || true
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          echo "Waiting for WARP to initialize..."
+          sleep 30
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip ffmpeg
+          pip3 install --upgrade yt-dlp
+
+      - name: Download YouTube Video
+        run: |
+          URL="${{ github.event.inputs.youtube_url }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
+
+          mkdir -p "videos/${FOLDER_NAME}"
+
+          case "$QUALITY" in
+            "audio")
+              FORMAT="bestaudio"
+              ;;
+            "best")
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+              ;;
+            "1080")
+              FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best"
+              ;;
+            "720")
+              FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best"
+              ;;
+            "480")
+              FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best"
+              ;;
+            *)
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+              ;;
+          esac
+
+          yt-dlp \
+            --proxy "socks5://127.0.0.1:1080" \
+            --format "$FORMAT" \
+            --merge-output-format mp4 \
+            --output "videos/${FOLDER_NAME}/%(title)s.%(ext)s" \
+            --no-playlist \
+            --retries 10 \
+            --fragment-retries 10 \
+            --no-check-certificates \
+            "$URL"
+
+          echo "✅ Download completed in videos/${FOLDER_NAME}/"
+
+      - name: Stop WARP Container
+        if: always()
+        run: |
+          docker stop warp || true
+          docker rm warp || true
+
+      - name: Commit & Push
+        run: |
+          FOLDER_NAME="${{ github.event.inputs.folder_name }}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          if [ -d "videos/${FOLDER_NAME}" ] && [ -n "$(ls -A videos/${FOLDER_NAME} 2>/dev/null)" ]; then
+            git add "videos/${FOLDER_NAME}/"
+            git commit -m "Download video to videos/${FOLDER_NAME} [skip ci]" || true
+            git pull --rebase origin main || true
+            git push origin HEAD:main
+          fi
